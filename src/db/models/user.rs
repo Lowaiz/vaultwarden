@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+use bigdecimal::BigDecimal;
 use chrono::{NaiveDateTime, TimeDelta, Utc};
 use derive_more::{AsRef, Deref, Display, From};
+use diesel::dsl::{count, max, sum};
 use serde_json::Value;
 
 use super::{
@@ -385,17 +388,44 @@ impl User {
         }}
     }
 
-    pub async fn get_all(conn: &mut DbConn) -> Vec<Self> {
+    pub async fn get_all_admin_api(conn: &mut DbConn) -> Vec<(Self, Option<NaiveDateTime>)> {
         db_run! {conn: {
-            users::table.load::<UserDb>(conn).expect("Error loading users").from_db()
+            users::table
+                .left_join(devices::table.on(devices::user_uuid.eq(users::uuid)))
+                .group_by(users::uuid)
+                .select((users::all_columns, max(devices::updated_at.assume_not_null())))
+                .load::<(UserDb, Option<NaiveDateTime>)>(conn)
+                .expect("Error loading users")
+                .into_iter()
+                .map(|(user, last_active)| (user.from_db(), last_active))
+                .collect()
+        }}
+    }
+    pub async fn get_all_admin_overview(conn: &mut DbConn) -> Vec<(Self, i64, i64, Option<BigDecimal>)> {
+        db_run! {conn: {
+            users::table
+                .left_join(ciphers::table.on(ciphers::user_uuid.assume_not_null().eq(users::uuid)).left_join(attachments::table.on(attachments::cipher_uuid.eq(ciphers::uuid))))
+                .group_by(users::uuid)
+                .select((users::all_columns, count(ciphers::uuid.assume_not_null()), count(attachments::id.assume_not_null()), sum(attachments::file_size.assume_not_null())))
+                .load::<(UserDb, i64, i64, Option<BigDecimal>)>(conn)
+                .expect("Error loading users")
+                .into_iter()
+                .map(|(user, cipher_count, attachment_count, attachment_size)| (user.from_db(), cipher_count, attachment_count, attachment_size))
+                .collect()
         }}
     }
 
-    pub async fn last_active(&self, conn: &mut DbConn) -> Option<NaiveDateTime> {
-        match Device::find_latest_active_by_user(&self.uuid, conn).await {
-            Some(device) => Some(device.updated_at),
-            None => None,
-        }
+    pub async fn last_actives(conn: &mut DbConn) -> HashMap<String, Option<NaiveDateTime>> {
+        db_run! {conn: {
+            users::table
+                .left_join(devices::table.on(devices::user_uuid.eq(users::uuid)))
+                .group_by(users::uuid)
+                .select((users::uuid, max(devices::updated_at.assume_not_null())))
+                .load::<(String, Option<NaiveDateTime>)>(conn)
+                .expect("Error loading users")
+                .into_iter()
+                .collect()
+        }}
     }
 }
 

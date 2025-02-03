@@ -334,13 +334,13 @@ fn logout(cookies: &CookieJar<'_>) -> Redirect {
 
 #[get("/users")]
 async fn get_users_json(_token: AdminToken, mut conn: DbConn) -> Json<Value> {
-    let users = User::get_all(&mut conn).await;
+    let users = User::get_all_admin_api(&mut conn).await;
     let mut users_json = Vec::with_capacity(users.len());
-    for u in users {
+    for (u, last_active) in users {
         let mut usr = u.to_json(&mut conn).await;
         usr["userEnabled"] = json!(u.enabled);
         usr["createdAt"] = json!(format_naive_datetime_local(&u.created_at, DT_FMT));
-        usr["lastActive"] = match u.last_active(&mut conn).await {
+        usr["lastActive"] = match last_active {
             Some(dt) => json!(format_naive_datetime_local(&dt, DT_FMT)),
             None => json!(None::<String>),
         };
@@ -352,18 +352,23 @@ async fn get_users_json(_token: AdminToken, mut conn: DbConn) -> Json<Value> {
 
 #[get("/users/overview")]
 async fn users_overview(_token: AdminToken, mut conn: DbConn) -> ApiResult<Html<String>> {
-    let users = User::get_all(&mut conn).await;
-    let mut users_json = Vec::with_capacity(users.len());
-    for u in users {
+    let users_infos = User::get_all_admin_overview(&mut conn).await;
+    let devices = User::last_actives(&mut conn).await;
+    let mut users_json = Vec::with_capacity(users_infos.len());
+    for (u, ciphers_count, attach_count, attach_sum) in users_infos {
         let mut usr = u.to_json(&mut conn).await;
-        usr["cipher_count"] = json!(Cipher::count_owned_by_user(&u.uuid, &mut conn).await);
-        usr["attachment_count"] = json!(Attachment::count_by_user(&u.uuid, &mut conn).await);
-        usr["attachment_size"] = json!(get_display_size(Attachment::size_by_user(&u.uuid, &mut conn).await));
+        let sum_as_i64 = match attach_sum {
+            Some(r) => r.to_i64().unwrap_or(i64::MAX),
+            None => 0,
+        };
+        usr["cipher_count"] = json!(ciphers_count);
+        usr["attachment_count"] = json!(attach_count);
+        usr["attachment_size"] = json!(get_display_size(sum_as_i64));
         usr["user_enabled"] = json!(u.enabled);
         usr["created_at"] = json!(format_naive_datetime_local(&u.created_at, DT_FMT));
-        usr["last_active"] = match u.last_active(&mut conn).await {
-            Some(dt) => json!(format_naive_datetime_local(&dt, DT_FMT)),
-            None => json!("Never"),
+        usr["last_active"] = match devices.get(u.uuid.as_ref()) {
+            Some(Some(dt)) => json!(format_naive_datetime_local(&dt, DT_FMT)),
+            _ => json!("Never")
         };
         users_json.push(usr);
     }
@@ -616,6 +621,8 @@ async fn has_http_access() -> bool {
 }
 
 use cached::proc_macro::cached;
+use num_traits::ToPrimitive;
+
 /// Cache this function to prevent API call rate limit. Github only allows 60 requests per hour, and we use 3 here already.
 /// It will cache this function for 300 seconds (5 minutes) which should prevent the exhaustion of the rate limit.
 #[cached(time = 300, sync_writes = true)]
